@@ -410,9 +410,10 @@ class Decoder(_OpusStruct):
 
 class BufferedDecoder(threading.Thread):
     DELAY = Decoder.FRAME_LENGTH / 1000.0
-
+    
     def __init__(self, ssrc, output_func, *, buffer=200):
         super().__init__(daemon=True, name='ssrc-%s' % ssrc)
+        print("BUFFERED DECODER W/ VARIABLE BUFFER")
 
         if buffer < 40: # technically 20 works but then FEC is useless
             raise ValueError("buffer size of %s is invalid; cannot be lower than 40" % buffer)
@@ -496,6 +497,7 @@ class BufferedDecoder(threading.Thread):
             self.DELAY = self.__class__.DELAY
 
     def _push(self, item):
+        print("Buffered decoder push")
         if not isinstance(item, (RTPPacket, SilencePacket)):
             raise TypeError(f"item should be an RTPPacket, not {item.__class__.__name__}")
 
@@ -682,7 +684,6 @@ class BufferedPacketDecoder(BasePacketDecoder):
     def __init__(self, ssrc, *, buffer=200):
         if buffer < 40: # technically 20 works but then FEC is useless
             raise ValueError("buffer size of %s is invalid; cannot be lower than 40" % buffer)
-
         self.ssrc = ssrc
         self._decoder = Decoder()
         self._buffer = []
@@ -708,8 +709,7 @@ class BufferedPacketDecoder(BasePacketDecoder):
         return next(iter(self))
 
     def feed_rtp(self, packet):
-        if self._last_ts < packet.timestamp:
-            self._push(packet)
+        self._push(packet)
 
     def feed_rtcp(self, packet):
         with self._lock:
@@ -750,6 +750,7 @@ class BufferedPacketDecoder(BasePacketDecoder):
             elif isinstance(existing_packet, RTPPacket):
                 return # duplicate packet
 
+            # if len(self._buffer) < 300:
             bisect.insort(self._buffer, item)
 
         # Optional diagnostics, will probably remove later
@@ -765,16 +766,14 @@ class BufferedPacketDecoder(BasePacketDecoder):
             self._overflow_mult = max(self._overflow_base, self._overflow_mult - self._overflow_incr)
 
     def _pop(self):
-        packet = nextpacket = None
+        packet  = None
         with self._lock:
             try:
-                self._buffer.append(SilencePacket(self.ssrc, self._buffer[-1].timestamp + Decoder.SAMPLES_PER_FRAME))
                 packet = self._buffer.pop(0)
-                nextpacket = self._buffer[0]
             except IndexError:
                 pass # empty buffer
 
-        return packet, nextpacket # return rtcp packets as well?
+        return packet # return rtcp packets as well?
 
     def _packet_gen(self):
         # Buffer packets
@@ -808,36 +807,29 @@ class BufferedPacketDecoder(BasePacketDecoder):
         for x in range(full_fill):
             yield None, None
 
+        #fix incorrect timestamp issue when user is talking during DiscordVoiceWebSocket Setup
+        # self._buffer.sort(key=lambda x: x.sequence)
+
         while True:
-            packet, nextpacket = self._pop()
-            self._last_ts = getattr(packet, 'timestamp', self._last_ts + Decoder.SAMPLES_PER_FRAME)
-            self._last_seq += 1 # self._last_seq = packet.sequence?
+            packet = self._pop()
 
-            if isinstance(packet, RTPPacket):
-                pcm = self._decoder.decode(packet.decrypted_data)
-
-            elif isinstance(nextpacket, RTPPacket):
-                pcm = self._decoder.decode(packet.decrypted_data, fec=True)
-                fec_packet = FECPacket(self.ssrc, nextpacket.sequence - 1, nextpacket.timestamp - Decoder.SAMPLES_PER_FRAME)
-                yield fec_packet, pcm
-
-                packet, _ = self._pop()
-                self._last_ts += Decoder.SAMPLES_PER_FRAME
-                self._last_seq += 1
-
-                pcm = self._decoder.decode(packet.decrypted_data)
-
-            elif packet is None:
-                break
+            if packet is not None:
+                if isinstance(packet, RTPPacket):
+                    self._last_ts = getattr(packet, 'timestamp', self._last_ts + Decoder.SAMPLES_PER_FRAME)
+                    self._last_seq += 1 # self._last_seq = packet.sequence?
+                    pcm = self._decoder.decode(packet.decrypted_data)
+                else:
+                    packet = SilencePacket(self.ssrc, 0)
+                    pcm = self._decoder.decode(None)
             else:
                 pcm = self._decoder.decode(None)
+                packet = SilencePacket(self.ssrc, 0)
 
             yield packet, pcm
 
 
 class BufferedDecoder(threading.Thread):
     """Ingests rtp packets and dispatches to decoders and sink output function."""
-
     def __init__(self, reader, *, decodercls=BufferedPacketDecoder):
         super().__init__(daemon=True, name='DecoderBuffer')
         self.reader = reader
@@ -970,11 +962,18 @@ class BufferedDecoder(threading.Thread):
         data = next(decoder)
         if any(data):
             packet, pcm = data
-            try:
-                self.output_func(pcm, packet.decrypted_data, packet)
-            except:
-                log.exception("Sink raised exception")
-                traceback.print_exc()
+            # if isinstance(packet, RTPPacket):
+            #     print("RTP PACKET")
+            # elif isinstance(packet, SilencePacket):
+            #     print("SILENCE PACKET!")
+            # else:
+            #     print("PACKET IS NONE!")
+            if packet is not None:
+                try:
+                    self.output_func(pcm, packet.decrypted_data, packet)
+                except:
+                    log.exception("Sink raised exception")
+                    traceback.print_exc()
 
         decoder.loops += 1
         decoder.next_time = decoder.start_time + decoder.DELAY * decoder.loops
