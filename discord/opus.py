@@ -527,13 +527,13 @@ class BufferedDecoder(threading.Thread):
         # Optional diagnostics, will probably remove later
             bufsize = len(self._buffer) # indent intentional
         if bufsize >= self.buffer_size * self._overflow_mult:
-            print(f"[router:push] Warning: rtp heap size has grown to {bufsize}")
+            # print(f"[router:push] Warning: rtp heap size has grown to {bufsize}")
             self._overflow_mult += self._overflow_incr
 
         elif bufsize <= self.buffer_size * (self._overflow_mult - self._overflow_incr) \
             and self._overflow_mult > self._overflow_base:
 
-            print(f"[router:push] Info: rtp heap size has shrunk to {bufsize}")
+            # print(f"[router:push] Info: rtp heap size has shrunk to {bufsize}")
             self._overflow_mult = max(self._overflow_base, self._overflow_mult - self._overflow_incr)
 
     def _pop(self):
